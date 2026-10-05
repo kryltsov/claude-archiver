@@ -21,8 +21,10 @@ from datetime import datetime, timedelta
 
 try:
     from . import config
+    from . import scope as scope_mod
 except ImportError:
     import config
+    import scope as scope_mod
 
 
 def _escape_fts_query(query: str) -> str:
@@ -73,24 +75,27 @@ class SessionSearch:
     def connect(self):
         self.conn = sqlite3.connect(str(self.db_path))
         self.conn.row_factory = sqlite3.Row
+        scope_mod.register(self.conn)
 
     def close(self):
         if self.conn:
             self.conn.close()
 
-    def search(self, query: str, limit: int = 20) -> list[dict]:
-        """Full-text search across all session content."""
-        rows = self.conn.execute("""
+    def search(self, query: str, limit: int = 20,
+               scope: 'scope_mod.Scope' = None) -> list[dict]:
+        """Full-text search across all session content, optionally scoped."""
+        scope_where, scope_params = (scope or scope_mod.Scope()).where('s')
+        rows = self.conn.execute(f"""
             SELECT s.session_id, s.project_name, s.title, s.title_display,
                    s.client, s.tags, s.exchange_count, s.start_time,
                    s.duration_minutes, s.has_compaction,
                    snippet(session_content, 1, '>>>', '<<<', '...', 40) as snippet
             FROM session_content
             JOIN sessions s ON s.session_id = session_content.session_id
-            WHERE session_content MATCH ?
+            WHERE session_content MATCH ? AND {scope_where}
             ORDER BY rank
             LIMIT ?
-        """, (_escape_fts_query(query), limit)).fetchall()
+        """, (_escape_fts_query(query), *scope_params, limit)).fetchall()
 
         results = []
         for row in rows:
@@ -103,8 +108,15 @@ class SessionSearch:
              agent: str = None, date: str = None, week: bool = False,
              days: int = None, project: str = None,
              exclude_project: str = None, has_compaction: bool = None,
-             limit: int = 20) -> list[dict]:
-        """Filter sessions by various criteria."""
+             limit: int = 20, scope: 'scope_mod.Scope' = None) -> list[dict]:
+        """Filter sessions by various criteria.
+
+        project/date/week/days are the upstream filters; they're folded into a
+        Scope (dates use the overlap rule). Pass scope= to use groups/--from/--to.
+        """
+        if scope is None:
+            scope = scope_mod.build(project=project, on=date, week=week, days=days,
+                                    group_config={})
         conditions = []
         params = []
 
@@ -124,23 +136,9 @@ class SessionSearch:
             conditions.append("s.session_id IN (SELECT session_id FROM session_agents WHERE agent_name LIKE ?)")
             params.append(f"%{agent}%")
 
-        if project:
-            conditions.append("(s.project_name LIKE ? OR s.project LIKE ?)")
-            params.extend([f"%{project}%", f"%{project}%"])
-
-        if date:
-            conditions.append("s.start_time LIKE ?")
-            params.append(f"{date}%")
-
-        if week:
-            week_ago = (datetime.now() - timedelta(days=7)).isoformat()
-            conditions.append("s.start_time >= ?")
-            params.append(week_ago)
-
-        if days:
-            days_ago = (datetime.now() - timedelta(days=days)).isoformat()
-            conditions.append("s.start_time >= ?")
-            params.append(days_ago)
+        scope_where, scope_params = scope.where('s')
+        conditions.append(scope_where)
+        params.extend(scope_params)
 
         if exclude_project:
             conditions.append("NOT (s.project_name LIKE ? OR s.project LIKE ?)")
@@ -180,9 +178,34 @@ class SessionSearch:
         """, (session_id,)).fetchall()
         return [dict(r) for r in rows]
 
-    def recent(self, n: int = 10) -> list[dict]:
+    def list_sessions(self, scope: 'scope_mod.Scope' = None, limit: int = None) -> list[dict]:
+        """Sessions in scope with where they ran: the writer handoff (list --json).
+
+        Oldest first; every field needed to open the transcript and place it in a repo.
+        """
+        scope_where, params = (scope or scope_mod.Scope()).where('s')
+        sql = f"""
+            SELECT s.session_id, s.file_path AS transcript_path, s.cwd, s.project_root,
+                   s.git_common_dir, s.git_branch, s.start_time, s.end_time,
+                   s.title_display AS title, s.project, s.exchange_count
+            FROM sessions s WHERE {scope_where}
+            ORDER BY s.start_time
+        """
+        if limit:
+            sql += " LIMIT ?"
+            params = [*params, limit]
+        rows = [dict(r) for r in self.conn.execute(sql, params)]
+        has_cwds = self.conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='session_cwds'").fetchone()
+        for r in rows:
+            r['cwds'] = [c[0] for c in self.conn.execute(
+                "SELECT cwd FROM session_cwds WHERE session_id=?", (r['session_id'],))] \
+                if has_cwds else []
+        return rows
+
+    def recent(self, n: int = 10, scope: 'scope_mod.Scope' = None) -> list[dict]:
         """Get N most recent sessions."""
-        return self.find(limit=n)
+        return self.find(limit=n, scope=scope)
 
     def stats(self) -> dict:
         """Get overall statistics."""

@@ -3,8 +3,10 @@
 Priority order:
 1. Function arguments (passed directly)
 2. Environment variables
-3. Config file (~/.session-index/config.json)
+3. Config file (<data home>/config.json)
 4. Sensible defaults
+
+The data home and env var prefix come from app.py.
 """
 
 import json
@@ -12,26 +14,38 @@ import os
 from pathlib import Path
 from typing import Optional
 
+try:
+    from . import app
+except ImportError:
+    import app
+
+DATA_HOME = app.data_home()
+
 DEFAULTS = {
     "projects_dir": str(Path.home() / ".claude" / "projects"),
-    "db_path": str(Path.home() / ".session-index" / "sessions.db"),
-    "topics_dir": str(Path.home() / ".claude" / "session-topics"),
+    "db_path": str(DATA_HOME / "sessions.db"),
+    "topics_dir": str(DATA_HOME / "session-topics"),
+    "plans_dir": str(Path.home() / ".claude" / "plans"),
+    "upstream_db": str(app.UPSTREAM_DB),
     "clients": [],
     "project_names": {},
+    "project_groups": {},
 }
 
-CONFIG_FILE = Path.home() / ".session-index" / "config.json"
+CONFIG_FILE = DATA_HOME / "config.json"
 
 _cached_config: Optional[dict] = None
 
 
 def _load_config_file() -> dict:
-    """Load config from ~/.session-index/config.json if it exists."""
+    """Load config from <data home>/config.json if it exists."""
     if CONFIG_FILE.exists():
         try:
-            return json.loads(CONFIG_FILE.read_text())
-        except (json.JSONDecodeError, OSError):
-            pass
+            return json.loads(CONFIG_FILE.read_text(encoding='utf-8'))
+        except (json.JSONDecodeError, OSError) as e:
+            # Say so: silently falling back to defaults hides every configured group.
+            import sys
+            print(f"warning: ignoring {CONFIG_FILE}: {e}", file=sys.stderr)
     return {}
 
 
@@ -52,9 +66,10 @@ def get_config() -> dict:
 
     # Layer on environment variables
     env_map = {
-        "SESSION_INDEX_PROJECTS": "projects_dir",
-        "SESSION_INDEX_DB": "db_path",
-        "SESSION_INDEX_TOPICS": "topics_dir",
+        f"{app.ENV_PREFIX}_PROJECTS": "projects_dir",
+        f"{app.ENV_PREFIX}_DB": "db_path",
+        f"{app.ENV_PREFIX}_TOPICS": "topics_dir",
+        f"{app.ENV_PREFIX}_PLANS": "plans_dir",
     }
     for env_key, config_key in env_map.items():
         val = os.environ.get(env_key)
@@ -87,6 +102,25 @@ def get_topics_dir(override: str = None) -> Path:
     if override:
         return Path(override).expanduser()
     return Path(get_config()["topics_dir"]).expanduser()
+
+
+def get_plans_dir(override: str = None) -> Path:
+    """Claude Code plans directory (plan files, one per slug)."""
+    if override:
+        return Path(override).expanduser()
+    return Path(get_config()["plans_dir"]).expanduser()
+
+
+def get_upstream_db() -> Optional[Path]:
+    """Upstream DB to copy from / import topics from. None when set to empty."""
+    val = get_config().get("upstream_db")
+    return Path(val).expanduser() if val else None
+
+
+def get_project_groups() -> dict[str, list[str]]:
+    """Named sets of folders: {"myapp": ["E:/work/app", ...]}."""
+    groups = get_config().get("project_groups") or {}
+    return groups if isinstance(groups, dict) else {}
 
 
 def get_clients() -> list[str]:

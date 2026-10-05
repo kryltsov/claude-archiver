@@ -24,8 +24,31 @@ from typing import Optional
 
 try:
     from . import config
+    from .folders import derive_roots
+    from . import plans, upstream
 except ImportError:
     import config
+    from folders import derive_roots
+    import plans
+    import upstream
+
+# Columns added on top of upstream's sessions table (ALTER TABLE on connect).
+FOLDER_COLUMNS = {
+    'cwd': 'TEXT',             # launch folder: first cwd in the transcript
+    'project_root': 'TEXT',    # git toplevel of cwd, else cwd; normalised
+    'git_common_dir': 'TEXT',  # groups worktrees; NULL without git
+    'git_branch': 'TEXT',      # first gitBranch
+    # 1 once this indexer has read the transcript for folders, even if it holds no
+    # cwd (message-less stubs). Rows copied from upstream start at 0 and fill in
+    # on the next index run.
+    'folders_scanned': 'INTEGER DEFAULT 0',
+}
+
+
+def format_plan_stats(st: dict) -> str:
+    return (f"Plans: {st['transcripts']} transcripts scanned, {st['skipped']} unchanged, "
+            f"{st['versions_added']} new versions, {st['edits_unresolved']} unresolved edits, "
+            f"{st['on_disk']} plan files on disk")
 
 
 class SessionIndexer:
@@ -35,11 +58,14 @@ class SessionIndexer:
         self.project_name_map = config.get_project_names()
         self.clients = config.get_clients()
         self.conn = None
+        self._roots_cache = {}  # cwd -> (project_root, git_common_dir)
 
     def connect(self):
         """Open DB connection and ensure schema exists."""
-        self.conn = sqlite3.connect(str(self.db_path))
+        # Hooks and manual runs can overlap: wait for locks instead of failing.
+        self.conn = sqlite3.connect(str(self.db_path), timeout=10)
         self.conn.row_factory = sqlite3.Row
+        self.conn.execute("PRAGMA busy_timeout=10000")
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA synchronous=NORMAL")
         self._create_schema()
@@ -104,6 +130,31 @@ class SessionIndexer:
             CREATE INDEX IF NOT EXISTS idx_sessions_start ON sessions(start_time);
             CREATE INDEX IF NOT EXISTS idx_topics_session ON session_topics(session_id);
             CREATE INDEX IF NOT EXISTS idx_topics_source ON session_topics(source);
+
+            CREATE TABLE IF NOT EXISTS session_cwds (
+                session_id TEXT NOT NULL,
+                cwd TEXT NOT NULL,
+                PRIMARY KEY (session_id, cwd)
+            );
+        """)
+
+        existing = {r['name'] for r in self.conn.execute("PRAGMA table_info(sessions)")}
+        for col, col_type in FOLDER_COLUMNS.items():
+            if col not in existing:
+                self.conn.execute(f"ALTER TABLE sessions ADD COLUMN {col} {col_type}")
+        if 'folders_scanned' not in existing and 'cwd' in existing:
+            # DBs from before the flag: a filled-in cwd means the folders were read.
+            self.conn.execute("UPDATE sessions SET folders_scanned = 1 WHERE cwd IS NOT NULL")
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_sessions_project_root ON sessions(project_root)"
+        )
+
+        plans.create_schema(self.conn)
+        # A plan's folders are its linked sessions' folders (derived, never stored).
+        self.conn.execute("""
+            CREATE VIEW IF NOT EXISTS plan_folders AS
+            SELECT DISTINCT ps.slug, ps.session_id, ps.role, s.project_root, s.git_common_dir
+            FROM plan_sessions ps JOIN sessions s ON s.session_id = ps.session_id
         """)
 
         # FTS5 table — check if exists first
@@ -143,6 +194,9 @@ class SessionIndexer:
         title_display = None
         tags_str = None
         summaries = []
+        cwd = None
+        git_branch = None
+        cwds = []  # distinct, in order of first use
 
         try:
             with open(session_path, 'r', encoding='utf-8', errors='ignore') as f:
@@ -160,6 +214,16 @@ class SessionIndexer:
                         if start_time is None:
                             start_time = timestamp
                         end_time = timestamp
+
+                    # Folders: launch cwd, every cwd used, first branch
+                    entry_cwd = entry.get('cwd')
+                    if entry_cwd:
+                        if cwd is None:
+                            cwd = entry_cwd
+                        if entry_cwd not in cwds:
+                            cwds.append(entry_cwd)
+                    if git_branch is None and entry.get('gitBranch'):
+                        git_branch = entry['gitBranch']
 
                     # Custom title (latest wins)
                     if entry_type == 'custom-title':
@@ -304,6 +368,9 @@ class SessionIndexer:
             'agents': agents,
             'fts_content': fts_content,
             'topics': topic_entries,
+            'cwd': cwd,
+            'git_branch': git_branch,
+            'cwds': cwds,
         }
 
     # First-line patterns that make bad auto-titles
@@ -326,6 +393,20 @@ class SessionIndexer:
                 return first_line[:77] + '...'
             return first_line
         return None
+
+    def _roots(self, cwd: Optional[str]) -> tuple:
+        """(project_root, git_common_dir) for cwd; git runs once per distinct cwd."""
+        if cwd not in self._roots_cache:
+            self._roots_cache[cwd] = derive_roots(cwd)
+        return self._roots_cache[cwd]
+
+    def _is_current(self, session_id: str, current_hash: str) -> bool:
+        """Already indexed by this indexer with this hash (folders included)."""
+        existing = self.conn.execute(
+            "SELECT file_hash, folders_scanned FROM sessions WHERE session_id=?", (session_id,)
+        ).fetchone()
+        return bool(existing and existing['file_hash'] == current_hash
+                    and existing['folders_scanned'])
 
     def index_session(self, session_id: str = None, file_path: str = None) -> bool:
         """Index a single session. Provide either session_id or file_path."""
@@ -384,6 +465,21 @@ class SessionIndexer:
                 data['duration_minutes'], data['model'], data['has_compaction'],
                 now, now, data['file_hash'],
             ))
+
+            # Folders (kept out of the upstream INSERT above so its diff stays small)
+            project_root, git_common_dir = self._roots(data['cwd'])
+            self.conn.execute("""
+                UPDATE sessions SET cwd=?, project_root=?, git_common_dir=?, git_branch=?,
+                    folders_scanned=1
+                WHERE session_id=?
+            """, (data['cwd'], project_root, git_common_dir, data['git_branch'],
+                  data['session_id']))
+            self.conn.execute("DELETE FROM session_cwds WHERE session_id=?", (data['session_id'],))
+            for c in data['cwds']:
+                self.conn.execute(
+                    "INSERT INTO session_cwds (session_id, cwd) VALUES (?, ?)",
+                    (data['session_id'], c)
+                )
 
             # Upsert tools
             self.conn.execute("DELETE FROM session_tools WHERE session_id=?", (data['session_id'],))
@@ -450,12 +546,7 @@ class SessionIndexer:
                 print(f"  Progress: {i + 1}/{stats['total']} ({stats['indexed']} indexed, {stats['errors']} errors)")
 
             # Skip if already indexed with same hash
-            session_id = session_path.stem
-            current_hash = self._file_hash(session_path)
-            existing = self.conn.execute(
-                "SELECT file_hash FROM sessions WHERE session_id=?", (session_id,)
-            ).fetchone()
-            if existing and existing['file_hash'] == current_hash:
+            if self._is_current(session_path.stem, self._file_hash(session_path)):
                 stats['skipped'] += 1
                 continue
 
@@ -470,6 +561,10 @@ class SessionIndexer:
                 stats['errors'] += 1
 
         print(f"\nBackfill complete: {stats['indexed']} indexed, {stats['skipped']} unchanged, {stats['errors']} errors")
+        stats['plans'] = self._plan_indexer().backfill()
+        print(format_plan_stats(stats['plans']))
+        stats['topics_imported'] = self.import_upstream_topics()
+        print(f"Upstream topics imported: {stats['topics_imported']}")
         return stats
 
     def index_incremental(self) -> dict:
@@ -481,14 +576,7 @@ class SessionIndexer:
                 continue
             for session_path in project_dir.glob("*.jsonl"):
                 stats['checked'] += 1
-                session_id = session_path.stem
-                current_hash = self._file_hash(session_path)
-
-                existing = self.conn.execute(
-                    "SELECT file_hash FROM sessions WHERE session_id=?", (session_id,)
-                ).fetchone()
-
-                if existing and existing['file_hash'] == current_hash:
+                if self._is_current(session_path.stem, self._file_hash(session_path)):
                     stats['unchanged'] += 1
                     continue
 
@@ -502,7 +590,16 @@ class SessionIndexer:
                 else:
                     stats['errors'] += 1
 
+        stats['plans'] = self._plan_indexer().index_incremental()
+        stats['topics_imported'] = self.import_upstream_topics()
         return stats
+
+    def import_upstream_topics(self) -> int:
+        """New hook topics from upstream's DB (read-only); 0 when upstream_db is off."""
+        return upstream.import_topics(self.conn, config.get_upstream_db())
+
+    def _plan_indexer(self) -> 'plans.PlanIndexer':
+        return plans.PlanIndexer(self.conn, config.get_plans_dir(), self.projects_dir)
 
     def get_stats(self) -> dict:
         """Get database statistics."""
@@ -564,7 +661,17 @@ def main():
     parser.add_argument('--stats', action='store_true', help='Show DB statistics')
     parser.add_argument('--db-path', metavar='PATH', help='Override database path')
     parser.add_argument('--projects-dir', metavar='PATH', help='Override projects directory')
+    parser.add_argument('--hook', metavar='EVENT',
+                        help='Run as a Claude Code hook (PreCompact/SessionEnd): '
+                             'reindex the session named on stdin, always exit 0')
     args = parser.parse_args()
+
+    if args.hook:
+        try:
+            from .hooks import index_hook
+        except ImportError:
+            from hooks import index_hook
+        sys.exit(index_hook(args.hook))
 
     db_path = config.get_db_path(override=args.db_path) if args.db_path else None
     projects_dir = config.get_projects_dir(override=args.projects_dir) if args.projects_dir else None
@@ -578,6 +685,8 @@ def main():
         elif args.incremental:
             stats = indexer.index_incremental()
             print(f"Incremental: {stats['indexed']} new/updated, {stats['unchanged']} unchanged, {stats['errors']} errors")
+            print(format_plan_stats(stats['plans']))
+            print(f"Upstream topics imported: {stats['topics_imported']}")
         elif args.index:
             if indexer.index_session(session_id=args.index):
                 print(f"Indexed: {args.index}")

@@ -29,7 +29,7 @@ except ImportError:
 
 # Config
 TOPIC_INTERVAL = 10  # Capture topic every N exchanges
-STATE_FILE = Path.home() / ".session-index" / "topic-capture-state.json"
+STATE_FILE = config.DATA_HOME / "topic-capture-state.json"
 
 # Noise patterns to skip
 SKIP_PATTERNS = [

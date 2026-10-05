@@ -24,8 +24,10 @@ from typing import Optional
 
 try:
     from . import config
+    from . import scope as scope_mod
 except ImportError:
     import config
+    import scope as scope_mod
 
 # ---------------------------------------------------------------------------
 # A. Context retrieval — JSONL parsing
@@ -324,29 +326,31 @@ def format_context(result: dict) -> str:
 
 def analytics(client: str = None, project: str = None,
               week: bool = False, month: bool = False,
-              db_path: Path = None) -> dict:
-    """Run analytics queries against sessions.db. Returns structured dict."""
+              db_path: Path = None, scope: 'scope_mod.Scope' = None) -> dict:
+    """Run analytics queries against sessions.db. Returns structured dict.
+
+    project/week/month are upstream's filters, folded into a Scope (the period
+    uses the overlap rule). Pass scope= for groups and --from/--to.
+    """
     if db_path is None:
         db_path = config.get_db_path()
+    if scope is None:
+        scope = scope_mod.build(project=project, week=week, month=month, group_config={})
 
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
+    scope_mod.register(conn)
     results = {}
 
-    # Period filter
-    period_clause = ""
-    period_params = []
-    period_label = "all time"
-    if week:
-        period_clause = "AND s.start_time >= ?"
-        period_params = [(datetime.now() - timedelta(days=7)).isoformat()]
-        period_label = "this week"
-    elif month:
-        period_clause = "AND s.start_time >= ?"
-        period_params = [(datetime.now() - timedelta(days=30)).isoformat()]
-        period_label = "this month"
+    # Period + group + project filter
+    scope_where, scope_params = scope.where('s')
+    # Trend sections keep their own fixed windows, but stay inside the groups/project.
+    folder_where, folder_params = scope.where('s', dates=False)
 
-    results["period"] = period_label
+    labels = [scope.dates.label] + [p for p in (
+        'group ' + ' + '.join(scope.groups) if scope.groups else '',
+        f'project ~{scope.project}' if scope.project else '') if p]
+    results["period"] = ' · '.join(labels)
 
     # Client filter
     client_clause = ""
@@ -355,15 +359,8 @@ def analytics(client: str = None, project: str = None,
         client_clause = "AND s.client LIKE ?"
         client_params = [f"%{client}%"]
 
-    # Project filter
-    project_clause = ""
-    project_params = []
-    if project:
-        project_clause = "AND (s.project_name LIKE ? OR s.project LIKE ?)"
-        project_params = [f"%{project}%", f"%{project}%"]
-
-    base_where = f"WHERE 1=1 {period_clause} {client_clause} {project_clause}"
-    base_params = period_params + client_params + project_params
+    base_where = f"WHERE {scope_where} {client_clause}"
+    base_params = scope_params + client_params
 
     # 1. Time per client
     rows = conn.execute(f"""
@@ -377,13 +374,13 @@ def analytics(client: str = None, project: str = None,
     results["time_per_client"] = [dict(r) for r in rows]
 
     # 2. Session frequency (last 14 days, ignoring period filter)
-    rows = conn.execute("""
-        SELECT date(start_time) as day, COUNT(*) as sessions,
-               SUM(duration_minutes) as minutes
-        FROM sessions
-        WHERE start_time >= date('now', '-14 days')
+    rows = conn.execute(f"""
+        SELECT date(s.start_time) as day, COUNT(*) as sessions,
+               SUM(s.duration_minutes) as minutes
+        FROM sessions s
+        WHERE s.start_time >= date('now', '-14 days') AND {folder_where}
         GROUP BY day ORDER BY day
-    """).fetchall()
+    """, folder_params).fetchall()
     results["daily_trend"] = [dict(r) for r in rows]
 
     # 3. Overall stats for period
@@ -412,18 +409,19 @@ def analytics(client: str = None, project: str = None,
     # 5. Tool trends: this week vs last week
     this_week_start = (datetime.now() - timedelta(days=7)).isoformat()
     last_week_start = (datetime.now() - timedelta(days=14)).isoformat()
-    rows = conn.execute("""
+    rows = conn.execute(f"""
         SELECT tool_name,
                SUM(CASE WHEN s.start_time >= ? THEN use_count ELSE 0 END) as this_week,
                SUM(CASE WHEN s.start_time >= ? AND s.start_time < ? THEN use_count ELSE 0 END) as last_week
         FROM session_tools st
         JOIN sessions s ON s.session_id = st.session_id
-        WHERE s.start_time >= ?
+        WHERE s.start_time >= ? AND {folder_where}
         GROUP BY tool_name
         HAVING this_week > 0 OR last_week > 0
         ORDER BY this_week DESC
         LIMIT 15
-    """, (this_week_start, last_week_start, this_week_start, last_week_start)).fetchall()
+    """, (this_week_start, last_week_start, this_week_start, last_week_start,
+          *folder_params)).fetchall()
     results["tool_trends"] = [dict(r) for r in rows]
 
     # 6. Most-discussed topics
