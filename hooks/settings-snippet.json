@@ -1,12 +1,13 @@
 {
   "hooks": {
-    "UserPromptSubmit": [
+    "PostToolUse": [
       {
-        "matcher": "",
+        "matcher": "Write|Edit|MultiEdit|ExitPlanMode",
         "hooks": [
           {
             "type": "command",
-            "command": "session-topic-capture UserPromptSubmit"
+            "timeout": 10,
+            "command": "C:/path/to/archiver/.venv/Scripts/archiver-plan-capture.exe"
           }
         ]
       }
@@ -17,7 +18,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "session-topic-capture PreCompact"
+            "timeout": 60,
+            "command": "C:/path/to/archiver/.venv/Scripts/archiver-index.exe --hook PreCompact"
           }
         ]
       }
@@ -28,7 +30,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "session-topic-capture SessionEnd"
+            "timeout": 60,
+            "command": "C:/path/to/archiver/.venv/Scripts/archiver-index.exe --hook SessionEnd"
           }
         ]
       }

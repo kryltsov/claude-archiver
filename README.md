@@ -1,32 +1,42 @@
-# Claude session index
+# archiver
 
-**Every Claude Code session you've ever had, searchable in under a second.**
+**Every Claude Code session and every plan you've ever had, searchable in under a second — by product, by date.**
 
-You've built things across hundreds of sessions. Solved problems, hit walls, found workarounds. But sessions disappear into `~/.claude/projects/` as unlabeled JSONL files — thousands of them, unsearchable, forgettable. This tool indexes them all into a fast SQLite database with full-text search, conversation retrieval, analytics, and cross-session synthesis.
+> **A fork of [lee-fuhr/claude-session-index](https://github.com/lee-fuhr/claude-session-index)** by Lee Fuhr (MIT, © 2026 Lee Fuhr), taken at commit [`ad2f2b2`](https://github.com/lee-fuhr/claude-session-index/commit/ad2f2b2) (v0.3.1). Everything that project does, this does too. See [What this fork changes](#what-this-fork-changes) for exactly what was kept, added and changed, and [NOTICE](NOTICE) for the attribution record.
 
-Ask "what did I try last time I debugged webhooks?" and get an actual answer.
+You've built things across hundreds of sessions. Solved problems, hit walls, found workarounds, wrote plans and rewrote them. But sessions disappear into `~/.claude/projects/` as unlabeled JSONL files, and `~/.claude/plans/` only ever holds the *last* version of each plan. This tool indexes all of it into a fast SQLite database with full-text search, conversation retrieval, analytics, plan history and cross-session synthesis.
+
+Ask "what did I try last time I debugged webhooks?" or "show me every version of the plan we approved for the rebalancer" and get an actual answer.
 
 ---
 
 ## Quick start
 
-```bash
-pip install claude-session-index
-```
-
-Then install the Claude Code skill:
+Not on PyPI yet. Install from a clone, in its own virtual environment:
 
 ```bash
-npx skills add lee-fuhr/claude-session-index
+git clone <this repo> archiver && cd archiver
+python -m venv .venv
+.venv/Scripts/pip install -e .        # macOS/Linux: .venv/bin/pip install -e .
 ```
 
-Or copy it manually:
+Then, once:
 
 ```bash
-cp skills/session-index/SKILL.md .claude/skills/session-index.md
+archiver init --from-upstream         # only if you already use claude-session-index: copy its DB
+archiver index                        # index sessions + plans (or just run any command)
+archiver hooks install                # shows the settings.json diff; add --apply to write it
 ```
 
-That's it. The first time you ask a question, it auto-indexes all your existing sessions. After that, queries return in milliseconds.
+The first command you run auto-indexes everything if the database is empty. The hooks keep plans and sessions current while you work (see [Hooks](#hooks)).
+
+Commands live in the venv (`.venv/Scripts/archiver`, or `.venv/bin/archiver`). Activate the venv or put that folder on your `PATH`.
+
+Install the Claude Code skill so Claude can answer questions about your history:
+
+```bash
+cp skills/archiver/SKILL.md ~/.claude/skills/archiver.md
+```
 
 ---
 
@@ -50,22 +60,18 @@ Claude searches across sessions, extracts the relevant conversations, and synthe
 >
 > **What worked:** Native OS-level clicking for all button interaction. Persistent browser profiles for session continuity.
 >
-> **What failed:** All JavaScript-based clicking — the framework intercepts and blocks it.
->
 > Sources: 5 sessions spanning Jan 10–Feb 1
 > → `claude --resume abc123...`
-> → `claude --resume def456...`
 
-### "How did I spend my week?"
+### "What did the plan for phase 1 look like before I pushed back on it?"
 
-> 89 sessions this week. 302 hours total.
+> The plan went through 13 versions in one session on Sep 17. You rejected it three times (v1, v5, v11) and approved v13. The first version put commits straight on `main`; by v13 it had a `claude_plans/` folder and a traceability rule.
 >
-> Windmill Labs: 2 sessions, 47h
-> GridSync: 2 sessions, 17h
-> NovaTech: 4 sessions, 7h
->
-> Top tools: Bash (3,214), Read (2,126), Edit (1,718)
-> Task agent usage up 142% from last week.
+> → `archiver plan ship-the-retry-queue --v 1`
+
+### "How did I spend my week on Acme?"
+
+> 24 sessions since Monday across acme-web, acme-api and acme-infra. 41 hours total. 6 plans written, 5 approved.
 
 Every answer includes `claude --resume` links so you can jump straight back into any session.
 
@@ -74,68 +80,115 @@ Every answer includes `claude --resume` links so you can jump straight back into
 ## What it does under the hood
 
 1. **Indexes** all your Claude Code sessions into SQLite with FTS5 full-text search
-2. **Searches** by content, client, project, tool, agent, tag, or date — results in milliseconds
-3. **Retrieves context** — actual conversation exchanges (user + assistant), not just metadata
-4. **Analyzes** your usage — time per client, tool trends, session frequency, topic patterns
-5. **Synthesizes** across sessions — "What approaches have I tried for X?" via in-session Haiku subagent (no extra API cost)
-6. **Tracks topics** live during sessions via Claude Code hooks
+2. **Indexes plans** — every version of every plan in `~/.claude/plans`, rebuilt from the transcripts (Write, Edit, ExitPlanMode) and the plans folder, with approved/rejected and a `transcript:line` citation for each version. Plans survive being overwritten or deleted
+3. **Knows where each session ran** — its start folder, every folder it `cd`'d into, the git root, branch and worktree
+4. **Searches** by content, client, project, **project group**, tool, agent, tag, or **date range** — sessions and plans, results in milliseconds
+5. **Retrieves context** — actual conversation exchanges (user + assistant), not just metadata
+6. **Analyzes** your usage — time per client, tool trends, session frequency, topic patterns
+7. **Synthesizes** across sessions — "What approaches have I tried for X?" via in-session Haiku subagent (no extra API cost)
+8. **Hands off** to other tools — `list --json` and `plans export` give scripts (e.g. writer) a product's sessions and plans across all its folders
 
 ---
 
 ## The CLI
 
-The skill handles the conversational interface. But if you want direct access from a terminal, everything goes through `sessions`:
+The skill handles the conversational interface. From a terminal, everything goes through `archiver`:
 
 ```bash
 # Search — just type what you're looking for
-sessions "webhook debugging"
-sessions "webhook" --context              # with conversation excerpts
+archiver "webhook debugging"
+archiver "webhook" --context              # with conversation excerpts
+archiver "webhook" --group myapp          # sessions AND plans of one product
+archiver "webhook" --in plans             # plans only (sessions | plans | all)
+archiver "webhook" --from 2026-09-01 --to 2026-09-15
+
+# Plans
+archiver plans --group myapp              # plans of a product, newest first
+archiver plan <slug>                      # latest version (a unique slug prefix is enough)
+archiver plan <slug> --versions           # every version: source, approved/rejected, citation
+archiver plan <slug> --approved           # latest approved version
+archiver plan <slug> --v 3 --raw          # one version's text, nothing else
+archiver plans-for <session_id>           # plans a session wrote or touched
+archiver plans export ./out --group myapp # <slug>/v<n>.md + index.json
+
+# Project groups
+archiver groups                           # each group: folders, sessions, plans, activity
+archiver list --group myapp --json        # sessions + transcript paths + folders
 
 # Browse a conversation
-sessions context <id> "term"              # exchanges matching a term
-sessions context <id>                     # all exchanges
+archiver context <id> "term"              # exchanges matching a term
+archiver context <id>                     # all exchanges
 
 # Analytics
-sessions analytics                        # overall stats
-sessions analytics --client "Acme"        # per-client
-sessions analytics --week                 # this week
-sessions analytics --month                # this month
+archiver analytics                        # overall stats
+archiver analytics --group myapp --from 2026-09-01
+archiver analytics --client "Acme"        # per-client
+archiver analytics --week                 # last 7 days (--month: last 30)
 
 # Synthesis (requires anthropic package + API key for standalone use)
-sessions synthesize "topic"               # cross-session intelligence
+archiver synthesize "topic"               # cross-session intelligence
 
 # Browse & filter
-sessions recent 20                        # last N sessions
-sessions find --client "Acme"             # filter by client
-sessions find --tool Task --week          # filter by tool + date
-sessions topics <session_id>              # topic timeline
-sessions tools                            # top tools across sessions
-sessions stats                            # database overview
+archiver recent 20 --group writer      # last N sessions
+archiver find --client "Acme"             # filter by client
+archiver find --tool Task --week          # filter by tool + date
+archiver topics <session_id>              # topic timeline
+archiver tools                            # top tools across sessions
+archiver stats                            # database overview
 
-# Indexing
-sessions index                            # index new/modified sessions
-sessions index --backfill                 # re-index everything
+# Indexing & setup
+archiver index                            # index new/modified sessions and plans
+archiver index --backfill                 # re-index everything
+archiver init --from-upstream [--force]   # one-time copy of claude-session-index's DB
+archiver hooks status | install | uninstall [--apply]
 ```
 
-Plain text defaults to search — `sessions "webhook debugging"` just works, no subcommand needed.
+Plain text defaults to search — `archiver "webhook debugging"` just works, no subcommand needed.
+
+**Scope flags** work the same on `search`, `find`, `recent`, `analytics`, `list` and `plans`:
+
+| Flag | Meaning |
+|---|---|
+| `--group NAME` | Sessions in a project group's folders. Repeat for a union. |
+| `--project X` | Substring match on the project name (unchanged from upstream). Combined with `--group`, it narrows inside the group. |
+| `--from YYYY-MM-DD` | Sessions overlapping this local day or later. Plans with a version captured then or later. |
+| `--to YYYY-MM-DD` | Same, this day or earlier. Both ends inclusive; either can be left out. |
+
+`--date`, `--week`, `--days N` (on `find`) and `--week` / `--month` (on `analytics`) still work as shortcuts for a range. Mixing them with `--from` / `--to` is an error.
 
 ### CLI output
 
-Search results look like this:
+Search with a group shows sessions, then plans:
 
 ```
-🔍 3 results for "silent failure"
+🔍 2 sessions for "retry budget" · group myapp
 
-  ◆ a5b111c6 · (unnamed)
-    2026-01-18 · my-project · 51 exchanges
-    "...This was a silent failure - appeared to work but didn't..."
-    → claude --resume a5b111c6-dca0-4ee9-b237-74b75baf13cd
+  ◆ 9521bc10 · harden the queue worker
+    2026-08-09 · app · 327 exchanges · 133min
+    "...the retry budget is shared across workers, so a hot shard can starve the others..."
+    → claude --resume 9521bc10-2d14-4bc2-9f7c-1d616398934b
 
-  ◆ 7b22239e · (unnamed)
-    2026-01-18 · my-project · 50 exchanges
-    "...The phrase 'silent failure, which is the ultimate sin'
-    captures the core requirement: systems must fail loudly..."
-    → claude --resume 7b22239e-9f90-466f-ad92-849840b2a6fd
+📝 2 plans for "retry budget" · group myapp
+
+  ◇ calm-rolling-maple · Hold the retry budget on every path
+    2 versions (2 matching) · ✓ approved · last 2026-08-09 · sessions 0118aa1f
+    "# Hold the retry budget on every path  ## Context  `docs/retries.md` claims the budget is..."
+    → archiver plan calm-rolling-maple
+```
+
+A plan's history:
+
+```
+╭─── Retry queue — phase 1 ───
+│ ship-the-retry-queue-brave-otter · 13 versions · ✓ approved
+│ C:\Users\me\.claude\plans\ship-the-retry-queue-brave-otter.md
+│ session 4f1c8ab2 (author) · e:/work/writer · 2026-09-17
+╰────────────────────────────────────────────────
+
+  v1   2026-09-17 11:47  write          rejected  4f1c8ab2  13732B  4f1c8ab2-….jsonl:220
+  v2   2026-09-17 11:49  edit           —         4f1c8ab2  15146B  4f1c8ab2-….jsonl:249
+  …
+  v13  2026-09-17 11:56  edit           approved  4f1c8ab2  17114B  4f1c8ab2-….jsonl:336
 ```
 
 Conversation context shows the actual chat:
@@ -163,65 +216,157 @@ Tool calls get collapsed into readable one-liners — `[Read: path]`, `[Edit: pa
 
 ---
 
-## Live topic tracking
+## What this fork changes
 
-Capture what you're working on during sessions via Claude Code hooks. Topics get indexed for search.
+[claude-session-index](https://github.com/lee-fuhr/claude-session-index) is the original: a SQLite + FTS5 index over your Claude Code transcripts, with search, conversation retrieval, analytics and live topic capture. This fork starts from it at `ad2f2b2` (v0.3.1) and keeps all of that intact.
 
-Add to `~/.claude/settings.json` (or merge with your existing hooks):
+**Kept from the original, unchanged in behaviour**
+
+| | |
+|---|---|
+| The index and its schema | `sessions`, `session_content` (FTS5), `session_topics`, `session_tools`, `session_agents` |
+| Transcript indexing | titles (including auto-titles from compaction summaries), tools, agents, topics, durations |
+| Search and retrieval | full-text search, `context` for real conversation exchanges, `tools`, `topics`, `stats` |
+| Analytics and synthesis | time per client, tool trends, session frequency, the Haiku-subagent `synthesize` |
+| Live topic capture | the `UserPromptSubmit` / `PreCompact` / `SessionEnd` hook, and the macOS LaunchAgent |
+| Configuration layering | CLI flags, then environment variables, then a config file, then defaults |
+| `--project` and `project_name` | same substring match, same derivation |
+| The default search | with no scope flags, output is identical to the original's |
+
+**Added by this fork**
+
+| | |
+|---|---|
+| **Plan indexing** | every version of every plan in `~/.claude/plans`, rebuilt from transcripts (`Write`, `Edit`/`MultiEdit`, `ExitPlanMode`) and from the plans folder, with approved/rejected status and a `transcript:line` citation per version, linked to the sessions that wrote or touched them. Plans survive being overwritten or deleted |
+| **Folder awareness** | each session's `cwd`, repository root, git common dir (worktrees) and branch, plus every folder a session worked in (`session_cwds`) |
+| **Project groups** | one product spanning several folders, filtered with `--group` |
+| **Date ranges** | `--from` / `--to` on every listing and searching command, matched by overlap rather than start time |
+| **One search over both** | `--in sessions \| plans \| all`, with plans ranked in their own FTS table |
+| **New commands** | `groups`, `list --json`, `plans`, `plan`, `plans-for`, `plans export`, `hooks install \| uninstall \| status` |
+| **Side-by-side install** | its own command names, data home and hook entries, a one-time DB copy (`init --from-upstream`) and a read-only topic import, so the original keeps working untouched |
+| **Tests** | a stdlib `unittest` suite; the original has none |
+
+**Changed from the original**
+
+| | |
+|---|---|
+| **The date shortcuts** | `--date`, `--week`, `--days N` and `analytics --week`/`--month` described a UTC comparison against a session's *start time*. They now describe a local day range matched by **overlap**, so they return more sessions: ones that started before the UTC day rolled over, and long ones that ran into the window. On one real index, `find --date <day>` went from 3 sessions to 6 and `find --week` from 20 to 23 |
+| **Command and data names** | `sessions` becomes `archiver`, and `~/.session-index/` becomes `~/.archiver/` (`ARCHIVER_HOME`), so both can run at once |
+| **An unreadable config** | was ignored silently, dropping every configured setting; now warns on stderr |
+| **Database locking** | indexing waits for a lock instead of failing, so hooks and manual runs can overlap |
+| **The skill** | renamed to `archiver` (`skills/archiver/SKILL.md`) so it can sit beside the original's skill |
+
+Parts of this work have been offered back upstream: [claude-session-index#4](https://github.com/lee-fuhr/claude-session-index/pull/4).
+
+## Plans
+
+Claude Code writes each plan to `~/.claude/plans/<slug>.md` and overwrites it on every edit. The file only ever has the last version, and it can be deleted. The archiver keeps all of them:
+
+- **From transcripts** (including subagent transcripts): each `Write` to a plan file is a version; each `Edit` / `MultiEdit` is rebuilt from the text before it; each `ExitPlanMode` records the submitted plan and whether you **approved or rejected** it. If you edit the plan in the approval dialog, the edited text is what's stored as approved.
+- **From the plans folder**: a file whose text differs from every known version (e.g. edited by hand) is stored too.
+- **Links**: every plan knows the sessions that wrote it (`author`, or `subagent`) or only touched it (`referenced`), and through them its folders and groups.
+- Identical texts are stored once. Each version cites the transcript and line it came from — the `<file>:<line>` shape other tools can quote.
+
+Version numbers (`v1`, `v2`, …) count over a plan's whole history, so a date filter or a repeat export never renumbers them.
+
+## Project groups
+
+One product is often several folders. Name them once in `~/.archiver/config.json`:
 
 ```json
 {
-  "hooks": {
-    "UserPromptSubmit": [
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "session-topic-capture UserPromptSubmit"
-          }
-        ]
-      }
-    ],
-    "PreCompact": [
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "session-topic-capture PreCompact"
-          }
-        ]
-      }
-    ],
-    "SessionEnd": [
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "session-topic-capture SessionEnd"
-          }
-        ]
-      }
-    ]
+  "project_groups": {
+    "myapp":     ["E:/work/app", "E:/work/app-cli", "E:/work/shared-infra"],
+    "writer": ["E:/work/writer", "E:/work/blog_site"],
+    "blog":       ["E:/work/blog", "E:/work/blog_web", "E:/work/shared-infra"]
   }
 }
 ```
 
-Topics are captured every 10 exchanges, before compaction, and at session end.
+- A session belongs to a member folder when its git root, **or any folder it worked in**, is that folder or sits under it. `\` vs `/` and drive-letter case don't matter.
+- A folder can be in several groups. `--group a --group b` returns each session once.
+- A plan belongs to the groups of the sessions linked to it.
+- `archiver groups` shows each group's folders with session and plan counts and first/last activity. It flags a folder that doesn't exist (typo?) and one that exists but has no sessions yet.
+- The config file must be valid JSON. If it isn't, every command warns and runs without groups.
+
+## Dates
+
+`--from` / `--to` take local calendar days, both inclusive. A session matches if it **overlaps** the range, so one that runs past midnight or over several days is never lost. A plan matches if any of its versions was captured in the range; `plan <slug> --versions --from D` lists just those versions.
+
+Transcript timestamps are UTC; the archiver converts your local days to UTC before comparing. (The original matched a UTC date prefix on the start time, which at UTC+10 misses sessions started before 10:00 local and long sessions that ran into the day. See the CHANGELOG.)
+
+## Handing off to other tools
+
+The database is plain SQLite (`~/.archiver/sessions.db`). Other tools can read the tables directly (Node ≥ 22 has `node:sqlite` built in), or use the two file handoffs:
+
+```bash
+archiver list --group writer --json        # session_id, transcript_path, cwd, cwds,
+                                              # project_root, git_common_dir, git_branch,
+                                              # start_time, end_time, title
+archiver plans export ./plans-out --group writer --from 2026-09-01
+                                              # ./plans-out/<slug>/v<n>.md + index.json
+```
+
+Each `v<n>.md` opens with frontmatter carrying the same provenance — version number, capture time, `approval: approved | rejected | unknown`, session id, `cite: <transcript>:<line>`, sha256 — so a tool that only reads markdown still sees it. `--plain` writes the plan text alone. Frontmatter holds only facts about that version, so a version file never changes once written; the plan's current title and version count live in `index.json`. `index.json` repeats it all in one file, plus the scope and `exported_at`.
+
+`--check` writes nothing and exits 1 when the folder is out of date (versions to write, stale files, or no `index.json`), so a script can refresh sources before reading them:
+
+```bash
+archiver plans export "$DIR" --group writer-lore --check ||   archiver plans export "$DIR" --group writer-lore --force
+```
+
+Each file's **modification time is the version's capture time**, not the time you ran the export, and a file whose text is already correct is left alone. A consumer whose watermark is a modification time (writer's `docs` source, for one) therefore sees only versions captured since it last looked, and re-exporting doesn't make the whole folder look new.
+
+---
+
+## Hooks
+
+Three hook entries keep the index current while you work:
+
+| Event | Command | What it does |
+|---|---|---|
+| `PostToolUse` (`Write\|Edit\|MultiEdit\|ExitPlanMode`) | `archiver-plan-capture` | Stores the plan version a tool call just produced. Any other file returns immediately. |
+| `PreCompact`, `SessionEnd` | `archiver-index --hook <event>` | Re-reads that session (folders, plans, subagents) and imports new topics. |
+
+Don't hand-edit these into `settings.json`. Let the archiver do it:
+
+```bash
+archiver hooks install            # prints the diff against ~/.claude/settings.json
+archiver hooks install --apply    # backs up settings.json, then writes
+archiver hooks status             # checks what's installed; exit 1 on problems
+archiver hooks uninstall --apply  # removes only the archiver's entries
+```
+
+- The commands use this install's absolute paths, **with forward slashes**. Claude Code runs hook commands through Git Bash on Windows, which strips backslashes: `E:\venv\Scripts\x.exe` becomes `E:venvScriptsx.exe: command not found`. Paths with spaces are quoted.
+- Only the archiver's own entries are added, replaced or removed. The original's topic hooks and any others are left exactly as they are.
+- Every archiver hook exits 0, logs to `~/.archiver/hooks.log`, and times out after 10 s (plan capture) or 60 s (index), so it can't block a session.
+- Sessions already open keep the hooks they started with. New sessions pick up the change.
+
+`hooks/settings-snippet.json` shows what gets written.
+
+## Running next to claude-session-index
+
+The archiver never writes to anything the original owns:
+
+| | claude-session-index | archiver |
+|---|---|---|
+| commands | `sessions`, `session-*` | `archiver`, `archiver-*` |
+| data | `~/.session-index/` | `~/.archiver/` (`ARCHIVER_HOME`) |
+| hooks | its 3 topic entries | its own 3 entries, next to them |
+
+- `archiver init --from-upstream` copies the original's database once (SQLite backup API, source opened read-only). After that, the archiver indexes transcripts itself.
+- **Live topics** come from the original's `UserPromptSubmit` hook and can't be rebuilt from transcripts. Every `archiver index` and session-end hook imports new ones from the original's DB, read-only. Set `"upstream_db": ""` in the config to turn that off.
+- The archiver has no topic hook of its own yet. Without the original installed, sessions still get titles and compaction-summary topics, but no live topic timeline.
 
 ### Background indexing (macOS)
 
-Keep the index fresh automatically:
-
 ```bash
-cp launchagent/com.session-indexer.plist ~/Library/LaunchAgents/
-# Edit the plist to point to your Python path
-launchctl load ~/Library/LaunchAgents/com.session-indexer.plist
+cp launchagent/com.archiver-indexer.plist ~/Library/LaunchAgents/
+# Edit the plist to point to the archiver venv's Python
+launchctl load ~/Library/LaunchAgents/com.archiver-indexer.plist
 ```
 
-Runs `session-index --incremental` every 30 minutes. Only processes new or modified sessions.
+Runs `archiver-index --incremental` every 30 minutes. Only processes new or modified sessions.
 
 ---
 
@@ -231,61 +376,77 @@ Works out of the box with sensible defaults. All paths are configurable.
 
 ### Priority order
 
-1. CLI flags (`--db-path`, `--projects-dir`)
-2. Environment variables (`SESSION_INDEX_DB`, `SESSION_INDEX_PROJECTS`, `SESSION_INDEX_TOPICS`)
-3. Config file (`~/.session-index/config.json`)
+1. CLI flags (`--db-path`, `--projects-dir`, `--settings`)
+2. Environment variables (`ARCHIVER_HOME`, `ARCHIVER_DB`, `ARCHIVER_PROJECTS`, `ARCHIVER_TOPICS`, `ARCHIVER_PLANS`)
+3. Config file (`~/.archiver/config.json`)
 4. Defaults
 
 ### Default paths
 
 | What | Default location |
 |------|-----------------|
-| Database | `~/.session-index/sessions.db` |
+| Data home | `~/.archiver/` (env `ARCHIVER_HOME`) |
+| Database | `~/.archiver/sessions.db` |
+| Config | `~/.archiver/config.json` |
+| Hook log | `~/.archiver/hooks.log` |
 | Sessions | `~/.claude/projects/` |
-| Topics | `~/.claude/session-topics/` |
-| Config | `~/.session-index/config.json` |
+| Plans | `~/.claude/plans/` |
+| Topics | `~/.archiver/session-topics/` |
+| Original's DB (topic import) | `~/.session-index/sessions.db` |
 
 ### Optional config file
 
 ```json
 {
   "projects_dir": "~/.claude/projects",
-  "db_path": "~/.session-index/sessions.db",
-  "topics_dir": "~/.claude/session-topics",
+  "plans_dir": "~/.claude/plans",
+  "db_path": "~/.archiver/sessions.db",
+  "upstream_db": "~/.session-index/sessions.db",
   "clients": ["Acme Corp", "Internal"],
   "project_names": {
     "-Users-me-projects-myapp": "My App"
+  },
+  "project_groups": {
+    "myapp": ["~/projects/myapp", "~/projects/myapp-api"]
   }
 }
 ```
 
 - **`clients`** — Optional. If provided, sessions are auto-tagged with matching client names. If empty, client detection is skipped.
 - **`project_names`** — Optional. Maps Claude's directory-based project names to friendly labels. If empty, auto-generates from directory names.
+- **`project_groups`** — Optional. Named sets of folders; see [Project groups](#project-groups).
+- **`upstream_db`** — The original's DB for the topic import. `""` turns it off.
 
 ---
 
 ## How it works (technically)
 
 ```
-~/.claude/projects/          session-index              Your conversation
+~/.claude/projects/          archiver                  Your conversation
   ├── -project-a/              ┌──────────┐
   │   ├── abc123.jsonl ──────▶│ SQLite   │◀──── "Didn't we discuss X?"
-  │   └── def456.jsonl ──────▶│ + FTS5   │◀──── "How'd I spend my week?"
-  ├── -project-b/              └──────────┘◀──── "What worked for Y?"
-  │   └── ghi789.jsonl ──────▶     │
-  └── ...                          │
-                                   ▼
+  │   └── abc123/subagents/ ─▶│ + FTS5   │◀──── "How'd I spend my week on myapp?"
+  ├── -project-b/              └──────────┘◀──── "Show me the approved plan"
+  │   └── ghi789.jsonl ──────▶     ▲   │
+~/.claude/plans/*.md ─────────────┘   ▼
                             sessions.db
                           ┌─────────────────┐
-                          │ sessions        │  metadata, timestamps, tools
+                          │ sessions        │  metadata, timestamps, tools, cwd,
+                          │                 │  project_root, git dir, branch
+                          │ session_cwds    │  every folder a session worked in
                           │ session_content │  FTS5 full-text index
                           │ session_topics  │  live topic timeline
                           │ session_tools   │  tool usage per session
                           │ session_agents  │  agent invocations
+                          │ plans           │  one row per plan slug
+                          │ plan_versions   │  every version, citation, approval
+                          │ plan_sessions   │  plan ↔ session (author/subagent/referenced)
+                          │ plan_content    │  FTS5 over every plan version
+                          │ plan_folders    │  view: a plan's folders via its sessions
                           └─────────────────┘
 ```
 
-The indexer parses JSONL files once, extracts metadata (timestamps, tools, agents, topics), and stores everything in SQLite. FTS5 handles the full-text search. Context retrieval reads JSONL on-demand — only the files you ask about.
+The indexer parses JSONL files once, extracts metadata (timestamps, tools, agents, topics, folders, plan signals), and stores everything in SQLite. Plan scans resume each transcript where the last one stopped. FTS5 handles the full-text search. Context retrieval reads JSONL on demand — only the files you ask about.
 
 ## Tech stack
 
@@ -293,14 +454,21 @@ The indexer parses JSONL files once, extracts metadata (timestamps, tools, agent
 - **SQLite + FTS5** — fast full-text search, no server needed
 - **Anthropic SDK** — optional, only for standalone `synthesize` command
 
+Tests: `python -m unittest discover -s tests` (stdlib `unittest`, no extra packages).
+
 ---
 
 ## Requirements
 
 - Python 3.10+
 - Claude Code (the sessions to index)
+- `git` on `PATH` (optional; used to find each session's repository root)
 - That's it. No server, no database setup, no API keys for core features.
 
 ---
 
-Built by [Lee Fuhr](https://leefuhr.com)
+## Credits and license
+
+The original is [claude-session-index](https://github.com/lee-fuhr/claude-session-index) by **[Lee Fuhr](https://leefuhr.com)** — the index, the search, the analytics and the conversational skill are his design and his code. This fork adds plan indexing, folder awareness, project groups, date ranges, the unified search and the hooks tooling.
+
+MIT, both copyrights, in one file: [LICENSE](LICENSE). The attribution record, listing what was taken and what was added, is in [NOTICE](NOTICE). Upstream's commit history is preserved in this repository, so authorship stays visible in `git log`.

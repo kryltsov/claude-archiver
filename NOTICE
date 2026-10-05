@@ -1,0 +1,39 @@
+claude-archiver
+Copyright (c) 2026 Igor Kryltsov
+
+Based on claude-session-index by Lee Fuhr
+https://github.com/lee-fuhr/claude-session-index
+at commit ad2f2b2 (v0.3.1), MIT licensed, Copyright (c) 2026 Lee Fuhr.
+
+claude-session-index provided, and this project keeps:
+
+  - the SQLite + FTS5 session index and its schema
+  - indexing of Claude Code transcripts (titles, tools, agents, topics, compaction)
+  - full-text search, conversation context retrieval, analytics and synthesis
+  - the "sessions" CLI shape that this project renamed to "archiver"
+  - live topic capture through Claude Code hooks
+  - the Claude Code skill, the LaunchAgent and the configuration layering
+
+This project adds:
+
+  - plan indexing: every version of every plan in ~/.claude/plans, rebuilt from
+    transcripts (Write, Edit/MultiEdit, ExitPlanMode) and from the plans folder,
+    with approval status and a transcript:line citation per version, linked to the
+    sessions that wrote or touched them
+  - folder awareness: each session's working directory, repository root, git common
+    directory and branch, plus every directory a session worked in
+  - project groups: one product spanning several folders, filtered with --group
+  - date ranges: --from / --to on every listing and searching command, matched by
+    overlap rather than start time
+  - one search across sessions and plans (--in sessions | plans | all)
+  - commands: groups, list --json, plans, plan, plans-for, plans export,
+    hooks install | uninstall | status
+  - running side by side with claude-session-index: its own command names, data home
+    and hook entries, a one-time database copy (init --from-upstream) and a read-only
+    topic import
+  - a test suite (none existed upstream)
+
+Parts of this work have been offered back upstream:
+https://github.com/lee-fuhr/claude-session-index/pull/4
+
+The MIT license text covering both copyrights is in LICENSE.

@@ -1,5 +1,48 @@
 # Changelog
 
+## Unreleased — archiver (fork of v0.3.1)
+
+A fork of claude-session-index that runs next to it under its own name (`archiver`) and data home (`~/.archiver/`). Everything below is new unless it says otherwise.
+
+### Plans
+
+- **Every version of every plan** in `~/.claude/plans`, rebuilt from transcripts (including subagents): `Write` stores the text, `Edit` / `MultiEdit` are replayed onto the previous text, `ExitPlanMode` records the submitted plan and whether it was approved or rejected. The plans folder itself is snapshotted too, so hand edits are kept. Plans survive being overwritten or deleted.
+- Each version cites the transcript and line it came from; identical texts are stored once.
+- Plans are linked to the sessions that wrote (`author` / `subagent`) or touched (`referenced`) them.
+- Commands: `plans`, `plan <slug> [--versions | --approved | --v N] [--raw]`, `plans-for <session>`, `plans export DIR`.
+- New tables: `plans`, `plan_versions`, `plan_sessions`, `plan_content` (FTS5), `plan_scan`; view `plan_folders`.
+
+### Folders and project groups
+
+- Sessions now record where they ran: `cwd`, `project_root` (git root, else cwd), `git_common_dir` (groups worktrees), `git_branch`, and every folder used (`session_cwds`). The real path, not the lossy encoded directory name (`-Users-me-work-blog-site` → `E:\work\blog_site`).
+- **Project groups** in config (`project_groups`): name a set of folders once, filter with `--group`. A folder can be in several groups. `archiver groups` reports each group's folders, sessions, plans and activity, and flags folders that don't exist.
+- `--project` and `project_name` are unchanged.
+
+### Dates and search
+
+- **`--from` / `--to`** (local days, inclusive) on `search`, `find`, `recent`, `analytics`, `list`, `plans`, `plan`.
+- **One search over sessions and plans**: `--in sessions | plans | all`. It defaults to `all` with `--group` / `--project`, and to `sessions` (the old behaviour and output) otherwise. `search` and `recent` gain `--project`.
+- `list [--json]`: sessions in scope with transcript path, folders, branch and times, for handing off to other tools.
+- `plans export --check`: writes nothing, reports what an export would do, exits 1 when the folder is out of date (versions to write, stale files, or a missing `index.json`). Stale files are reported but never deleted.
+- `plans export` writes provenance frontmatter into each `v<n>.md` (version, capture time, approval, session, `transcript:line`, sha256; `--plain` turns it off), stamps each file with the version's capture time rather than the export time, and leaves files whose text is already correct untouched — so a consumer whose watermark is a modification time sees only what's new.
+
+### Hooks and setup
+
+- `archiver hooks install | uninstall | status`: writes, removes or checks the archiver's own `settings.json` entries (diff first, `--apply` with a backup). Paths use forward slashes and are quoted when they contain a space.
+- Hook handlers: `archiver-plan-capture` (PostToolUse) and `archiver-index --hook <event>` (PreCompact / SessionEnd). Both always exit 0 and log to `~/.archiver/hooks.log`.
+- `archiver init --from-upstream [--force]`: one-time copy of claude-session-index's DB (backup API, source read-only). New hook topics are imported from it on every index run.
+- One data home for DB, config, state and logs (`ARCHIVER_HOME`); env vars use the `ARCHIVER_` prefix.
+
+### Changed behaviour
+
+- **The date shortcuts use local days and the overlap rule.** `--date`, `--week`, `--days` and `analytics --week / --month` used to compare against the session's start time only — `--date` as a UTC date prefix. Now a session counts if it overlaps the range in your local time. More sessions match: on one real index, `find --date 2026-09-17` went from 3 sessions to 6, and `find --week` from 17 to 24. The missed ones had started before 10:00 local time (at UTC+10) or ran into the day from the one before.
+- An unreadable `config.json` now prints a warning instead of being silently ignored.
+- The indexer waits up to 10 s for a database lock instead of failing, so hooks and manual runs can overlap.
+
+### Tests
+
+- A `tests/` suite (stdlib `unittest`, 101 tests): fixture transcripts for each plan signal, folder changes inside a session, group path matching (subfolders, `\` vs `/`, drive case, `_` in names), date-overlap edges, hook handlers and `settings.json` handling.
+
 ## v0.3.1 — Stop titling everything "## Curation Data"
 
 - **Smarter title auto-generation** — skips markdown headers, agent system prompts, and system caveats when picking a title from user messages. Tries up to 5 messages before giving up.

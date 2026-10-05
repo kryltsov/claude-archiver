@@ -3,16 +3,19 @@ requires = ["setuptools>=68.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "claude-session-index"
-version = "0.3.1"
-description = "Index, search, and analyze your Claude Code sessions"
+name = "claude-archiver"
+version = "0.4.0"
+description = "Index, search and analyze your Claude Code sessions and every version of every plan"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"
 authors = [
-    {name = "Lee Fuhr", email = "hi@leefuhr.com"}
+    {name = "Igor Kryltsov"}
 ]
-keywords = ["claude", "claude-code", "session", "search", "index", "sqlite", "fts5"]
+maintainers = [
+    {name = "Igor Kryltsov"}
+]
+keywords = ["claude", "claude-code", "session", "plans", "search", "index", "sqlite", "fts5"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
@@ -29,17 +32,21 @@ classifiers = [
 [project.optional-dependencies]
 synthesis = ["anthropic>=0.30.0"]
 
+# Archiver names (upstream: sessions, session-index, session-search,
+# session-analyze, session-topic-capture). Topic capture isn't exposed while
+# running in parallel with upstream; it comes back at cut-over.
 [project.scripts]
-sessions = "session_index.cli:main"
-session-index = "session_index.indexer:main"
-session-search = "session_index.search:main"
-session-analyze = "session_index.analyzer:main"
-session-topic-capture = "session_index.topic_capture:main"
+archiver = "session_index.cli:main"
+archiver-index = "session_index.indexer:main"
+archiver-search = "session_index.search:main"
+archiver-analyze = "session_index.analyzer:main"
+archiver-plan-capture = "session_index.hooks:plan_capture_main"
 
 [project.urls]
-Homepage = "https://github.com/lee-fuhr/claude-session-index"
-Repository = "https://github.com/lee-fuhr/claude-session-index"
-Issues = "https://github.com/lee-fuhr/claude-session-index/issues"
+Homepage = "https://github.com/kryltsov/claude-archiver"
+Repository = "https://github.com/kryltsov/claude-archiver"
+Issues = "https://github.com/kryltsov/claude-archiver/issues"
+"Upstream project" = "https://github.com/lee-fuhr/claude-session-index"
 
 [tool.setuptools.packages.find]
 include = ["session_index*"]

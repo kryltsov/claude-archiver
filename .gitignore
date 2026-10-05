@@ -34,8 +34,11 @@ env/
 .gemini/
 .opencode/
 
-# Session handoff (not for public repo)
+# Session handoff and local planning notes (not for the public repo)
 HANDOFF.md
+PLAN-*.md
+*-PROPOSAL.md
+*-INTEGRATION.md
 
 # OS
 .DS_Store

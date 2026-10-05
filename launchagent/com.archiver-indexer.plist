@@ -3,11 +3,11 @@
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.session-indexer</string>
+    <string>com.archiver-indexer</string>
 
     <key>ProgramArguments</key>
     <array>
-        <!-- Update this path to your Python installation -->
+        <!-- Update this path to the archiver venv's Python (e.g. /path/to/archiver/.venv/bin/python) -->
         <string>/usr/bin/python3</string>
         <string>-m</string>
         <string>session_index.indexer</string>
@@ -18,9 +18,9 @@
     <integer>1800</integer>
 
     <key>StandardOutPath</key>
-    <string>/tmp/session-indexer.log</string>
+    <string>/tmp/archiver-indexer.log</string>
     <key>StandardErrorPath</key>
-    <string>/tmp/session-indexer.log</string>
+    <string>/tmp/archiver-indexer.log</string>
 
     <key>RunAtLoad</key>
     <false/>
