@@ -326,7 +326,7 @@ Three hook entries keep the index current while you work:
 | Event | Command | What it does |
 |---|---|---|
 | `PostToolUse` (`Write\|Edit\|MultiEdit\|ExitPlanMode`) | `archiver-plan-capture` | Stores the plan version a tool call just produced. Any other file returns immediately. |
-| `PreCompact`, `SessionEnd` | `archiver-index --hook <event>` | Re-reads that session (folders, plans, subagents) and imports new topics. |
+| `PreCompact`, `SessionEnd` | `archiver-index --hook <event>` | Re-reads that session (messages, folders, plans, subagents) and imports new topics. |
 
 Don't hand-edit these into `settings.json`. Let the archiver do it:
 
@@ -434,7 +434,8 @@ Works out of the box with sensible defaults. All paths are configurable.
                           │ sessions        │  metadata, timestamps, tools, cwd,
                           │                 │  project_root, git dir, branch
                           │ session_cwds    │  every folder a session worked in
-                          │ session_content │  FTS5 full-text index
+                          │ messages        │  every prompt and reply, one-line tool calls
+                          │ session_content │  FTS5 full-text index over messages
                           │ session_topics  │  live topic timeline
                           │ session_tools   │  tool usage per session
                           │ session_agents  │  agent invocations
@@ -446,7 +447,9 @@ Works out of the box with sensible defaults. All paths are configurable.
                           └─────────────────┘
 ```
 
-The indexer parses JSONL files once, extracts metadata (timestamps, tools, agents, topics, folders, plan signals), and stores everything in SQLite. Plan scans resume each transcript where the last one stopped. FTS5 handles the full-text search. Context retrieval reads JSONL on demand — only the files you ask about.
+The indexer parses JSONL files once, extracts metadata (timestamps, tools, agents, topics, folders, plan signals), and stores everything in SQLite. Plan scans resume each transcript where the last one stopped. FTS5 handles the full-text search. Context retrieval reads the stored messages, and falls back to the JSONL only for a session that hasn't been indexed yet.
+
+**Compaction loses nothing.** Claude Code appends a compaction boundary and a summary to the same transcript, leaving every earlier line in place. The `messages` table works the same way: every prompt and reply is kept in full, with a one-line stub per tool call (`[Edit: path]`, `[Bash: command]`). Rows are only ever inserted, so a message survives even if its transcript is later rewritten or deleted. Each row records which compaction segment it belongs to (`compact_epoch`). Each summary is stored as an extra row and as a `compaction_summary` topic. Tool results and full tool inputs stay in the JSONL only; `line_no` points back to them.
 
 ## Tech stack
 

@@ -26,11 +26,13 @@ try:
     from . import config
     from .folders import derive_roots
     from . import plans, upstream
+    from . import messages
 except ImportError:
     import config
     from folders import derive_roots
     import plans
     import upstream
+    import messages
 
 # Columns added on top of upstream's sessions table (ALTER TABLE on connect).
 FOLDER_COLUMNS = {
@@ -139,7 +141,7 @@ class SessionIndexer:
         """)
 
         existing = {r['name'] for r in self.conn.execute("PRAGMA table_info(sessions)")}
-        for col, col_type in FOLDER_COLUMNS.items():
+        for col, col_type in {**FOLDER_COLUMNS, **messages.SESSION_COLUMNS}.items():
             if col not in existing:
                 self.conn.execute(f"ALTER TABLE sessions ADD COLUMN {col} {col_type}")
         if 'folders_scanned' not in existing and 'cwd' in existing:
@@ -150,6 +152,7 @@ class SessionIndexer:
         )
 
         plans.create_schema(self.conn)
+        messages.create_schema(self.conn)
         # A plan's folders are its linked sessions' folders (derived, never stored).
         self.conn.execute("""
             CREATE VIEW IF NOT EXISTS plan_folders AS
@@ -197,14 +200,28 @@ class SessionIndexer:
         cwd = None
         git_branch = None
         cwds = []  # distinct, in order of first use
+        message_rows = []
+        compactions = []  # (timestamp, summary text), in order
+        epoch = 0  # compact_boundary entries seen so far
 
         try:
             with open(session_path, 'r', encoding='utf-8', errors='ignore') as f:
-                for line in f:
+                for line_no, line in enumerate(f, 1):
                     try:
                         entry = json.loads(line)
                     except json.JSONDecodeError:
                         continue
+                    if not isinstance(entry, dict):
+                        continue
+
+                    # The conversation, kept whole; compaction only bumps the epoch
+                    if messages.is_compact_boundary(entry):
+                        epoch += 1
+                    row = messages.message_row(entry, line_no, epoch)
+                    if row:
+                        message_rows.append(row)
+                        if row['kind'] == 'compact_summary':
+                            compactions.append((row['timestamp'], row['text']))
 
                     entry_type = entry.get('type')
                     timestamp = entry.get('timestamp')
@@ -346,6 +363,14 @@ class SessionIndexer:
                 'captured_at': end_time or datetime.now().isoformat(),
                 'exchange_number': None,
             })
+        for n, (ts, text) in enumerate(compactions, 1):
+            topic_entries.append({
+                'topic': messages.compact_topic(text, n),
+                'source': 'compaction_summary',
+                'captured_at': ts or end_time or datetime.now().isoformat(),
+                'exchange_number': None,
+            })
+        compaction_count = max(epoch, len(compactions))
 
         return {
             'session_id': session_id,
@@ -362,7 +387,9 @@ class SessionIndexer:
             'end_time': end_time,
             'duration_minutes': duration,
             'model': model,
-            'has_compaction': 1 if has_compaction else 0,
+            'has_compaction': 1 if (has_compaction or compaction_count) else 0,
+            'compaction_count': compaction_count,
+            'messages': message_rows,
             'file_hash': self._file_hash(session_path),
             'tools': tools,
             'agents': agents,
@@ -403,10 +430,11 @@ class SessionIndexer:
     def _is_current(self, session_id: str, current_hash: str) -> bool:
         """Already indexed by this indexer with this hash (folders included)."""
         existing = self.conn.execute(
-            "SELECT file_hash, folders_scanned FROM sessions WHERE session_id=?", (session_id,)
+            "SELECT file_hash, folders_scanned, messages_scanned FROM sessions WHERE session_id=?",
+            (session_id,)
         ).fetchone()
         return bool(existing and existing['file_hash'] == current_hash
-                    and existing['folders_scanned'])
+                    and existing['folders_scanned'] and existing['messages_scanned'])
 
     def index_session(self, session_id: str = None, file_path: str = None) -> bool:
         """Index a single session. Provide either session_id or file_path."""
@@ -497,12 +525,22 @@ class SessionIndexer:
                     (data['session_id'], agent, count)
                 )
 
-            # Upsert FTS content
+            # Messages: insert-only, so nothing stored is ever lost to a compaction
+            # or a rewritten transcript
+            messages.store(self.conn, data['session_id'], data['messages'])
+            self.conn.execute(
+                "UPDATE sessions SET compaction_count=?, messages_scanned=1 WHERE session_id=?",
+                (data['compaction_count'], data['session_id'])
+            )
+
+            # FTS content: every stored message (the old first-50-prompts text only
+            # for a session with nothing stored)
+            content = messages.search_text(self.conn, data['session_id']) or data['fts_content']
             self.conn.execute("DELETE FROM session_content WHERE session_id=?", (data['session_id'],))
-            if data['fts_content']:
+            if content:
                 self.conn.execute(
                     "INSERT INTO session_content (session_id, content) VALUES (?, ?)",
-                    (data['session_id'], data['fts_content'])
+                    (data['session_id'], content)
                 )
 
             # Add topics from compaction summaries (don't delete existing hook-captured topics)
@@ -608,6 +646,9 @@ class SessionIndexer:
         stats['total_topics'] = self.conn.execute("SELECT COUNT(*) FROM session_topics").fetchone()[0]
         stats['total_tools'] = self.conn.execute("SELECT COUNT(DISTINCT tool_name) FROM session_tools").fetchone()[0]
         stats['total_agents'] = self.conn.execute("SELECT COUNT(DISTINCT agent_name) FROM session_agents").fetchone()[0]
+        stats['total_messages'] = self.conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
+        stats['compacted_sessions'] = self.conn.execute(
+            "SELECT COUNT(*) FROM sessions WHERE compaction_count > 0").fetchone()[0]
 
         # Sessions by project
         rows = self.conn.execute(

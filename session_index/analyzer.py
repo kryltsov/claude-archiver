@@ -109,8 +109,24 @@ def extract_exchanges(session_path: str | Path, query: str = None,
     path = Path(session_path)
     if not path.exists():
         return []
+    entries = _jsonl_entries(path)
+    return _pair_exchanges(entries, query, limit, max_chars) if entries else []
 
-    # First pass: collect ordered entries
+
+def load_exchanges(conn: sqlite3.Connection, session_id: str, session_path, query: str = None,
+                   limit: int = 10, max_chars: int = 1000) -> list[dict]:
+    """Exchanges from the stored messages; the transcript only for sessions not stored yet."""
+    try:
+        from . import messages
+    except ImportError:
+        import messages
+    entries = messages.entries(conn, session_id)
+    if entries:
+        return _pair_exchanges(entries, query, limit, max_chars)
+    return extract_exchanges(session_path, query=query, limit=limit, max_chars=max_chars)
+
+
+def _jsonl_entries(path: Path) -> list[dict]:
     entries = []
     try:
         with open(path, "r", encoding="utf-8", errors="ignore") as f:
@@ -141,7 +157,10 @@ def extract_exchanges(session_path: str | Path, query: str = None,
     except Exception as e:
         print(f"Error reading {path}: {e}", file=sys.stderr)
         return []
+    return entries
 
+
+def _pair_exchanges(entries: list[dict], query: str, limit: int, max_chars: int) -> list[dict]:
     # Pair consecutive user → assistant messages
     exchanges = []
     i = 0
@@ -244,9 +263,12 @@ def get_context(session_id: str, query: str = None, limit: int = 10,
         return {"error": f"Session not found: {session_id}"}
 
     session_info = dict(row)
-    exchanges = extract_exchanges(
-        session_info["file_path"], query=query, limit=limit
-    )
+    conn = sqlite3.connect(str(db_path))
+    try:
+        exchanges = load_exchanges(conn, session_info["session_id"], session_info["file_path"],
+                                   query=query, limit=limit)
+    finally:
+        conn.close()
 
     return {
         "session": session_info,
@@ -591,9 +613,8 @@ def synthesize(query: str, limit: int = 10, max_excerpt_chars: int = 2000,
         LIMIT ?
     """, (query, limit)).fetchall()
 
-    conn.close()
-
     if not rows:
+        conn.close()
         return {
             "error": f"No sessions found matching: {query}",
             "sessions": [],
@@ -613,9 +634,8 @@ def synthesize(query: str, limit: int = 10, max_excerpt_chars: int = 2000,
             "client": info.get("client", ""),
         })
 
-        exchanges = extract_exchanges(
-            info["file_path"], query=query, limit=5, max_chars=max_excerpt_chars
-        )
+        exchanges = load_exchanges(conn, info["session_id"], info["file_path"],
+                                   query=query, limit=5, max_chars=max_excerpt_chars)
 
         if exchanges:
             excerpt_lines = []
@@ -627,6 +647,8 @@ def synthesize(query: str, limit: int = 10, max_excerpt_chars: int = 2000,
                 excerpt_lines.append(f"Assistant: {ex['assistant']}")
                 excerpt_lines.append("")
             session_excerpts.append("\n".join(excerpt_lines))
+
+    conn.close()
 
     if not session_excerpts:
         return {

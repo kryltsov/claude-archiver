@@ -4,6 +4,14 @@
 
 A fork of claude-session-index that runs next to it under its own name (`archiver`) and data home (`~/.archiver/`). Everything below is new unless it says otherwise.
 
+### The whole conversation, kept through compaction
+
+- **New `messages` table**: every user prompt and assistant reply in full, plus a one-line stub per tool call (`[Edit: path]`, `[Bash: command]`, max 200 chars). Tool results and full tool inputs are not stored. Rows are insert-only, keyed on `(session_id, uuid)`: reindexing never rewrites or deletes them, so a message survives even if its transcript is later rewritten or removed.
+- **Full-text search covers every message.** Before, `session_content` held only the first 50 user prompts (capped at 100,000 chars), so anything said after roughly the first compaction couldn't be found, and assistant replies were never indexed.
+- **Compaction is detected again.** Current Claude Code writes `system/compact_boundary` plus a user entry with `isCompactSummary`, not the old `type: "summary"` the indexer looked for, so `has_compaction` was 0 for every session. New `compaction_count` column; each message records its `compact_epoch`; each summary is stored as a `compact_summary` message and a `compaction_summary` topic (`Compaction N: <first line of the request>`).
+- `context`, `search --context` and `synthesize` read the stored messages, and fall back to the JSONL only for sessions not indexed yet.
+- Upgrading: a new `messages_scanned` flag makes the next `archiver index` re-read every transcript still on disk (once). Sessions whose JSONL is already gone keep their old rows unchanged.
+
 ### Plans
 
 - **Every version of every plan** in `~/.claude/plans`, rebuilt from transcripts (including subagents): `Write` stores the text, `Edit` / `MultiEdit` are replayed onto the previous text, `ExitPlanMode` records the submitted plan and whether it was approved or rejected. The plans folder itself is snapshotted too, so hand edits are kept. Plans survive being overwritten or deleted.

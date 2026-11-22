@@ -23,6 +23,7 @@ class Transcript:
     def _base(self, type_: str) -> dict:
         d = {'type': type_, 'sessionId': self.session_id, 'isSidechain': self.sidechain,
              'cwd': self.cwd, 'timestamp': self._ts()}
+        d['uuid'] = f"{self.session_id[:8]}-{self._n:04d}"
         if self.slug:
             d['slug'] = self.slug
         return d
@@ -30,6 +31,25 @@ class Transcript:
     def user(self, text: str) -> 'Transcript':
         d = self._base('user')
         d['message'] = {'role': 'user', 'content': text}
+        self.lines.append(d)
+        return self
+
+    def reply(self, text: str) -> 'Transcript':
+        d = self._base('assistant')
+        d['message'] = {'role': 'assistant', 'model': 'claude-test',
+                        'content': [{'type': 'text', 'text': text}]}
+        self.lines.append(d)
+        return self
+
+    def compact(self, summary: str) -> 'Transcript':
+        """A compaction as Claude Code records it: a boundary, then the summary."""
+        d = self._base('system')
+        d.update({'subtype': 'compact_boundary', 'content': 'Conversation compacted',
+                  'compactMetadata': {'trigger': 'manual'}})
+        self.lines.append(d)
+        d = self._base('user')
+        d.update({'isCompactSummary': True, 'isVisibleInTranscriptOnly': True,
+                  'message': {'role': 'user', 'content': summary}})
         self.lines.append(d)
         return self
 
