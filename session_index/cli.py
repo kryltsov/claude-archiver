@@ -608,6 +608,10 @@ def main():
                     flag = '   · no sessions yet'
                 print(f"    {m['folder']:36s} {m['sessions']:>4d} sessions {m['plans']:>4d} plans  "
                       f"{day(m['first'])} → {day(m['last'])}{flag}")
+                for w in m.get('worktrees', []):
+                    gone = '' if w['exists'] else '   · worktree removed'
+                    print(f"      + worktree {w['folder']:23s} {w['sessions']:>4d} sessions "
+                          f"{w['plans']:>4d} plans  {day(w['first'])} → {day(w['last'])}{gone}")
         print()
 
     elif args.command == 'list':

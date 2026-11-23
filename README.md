@@ -284,9 +284,10 @@ One product is often several folders. Name them once in `~/.archiver/config.json
 ```
 
 - A session belongs to a member folder when its git root, **or any folder it worked in**, is that folder or sits under it. `\` vs `/` and drive-letter case don't matter.
+- **Git worktrees come along automatically.** List a repo's main folder and the group also covers every `git worktree` of that repo, wherever it lives (`E:/work/app` covers a worktree at `E:/work/app-feature`). This still works after a worktree is removed: sessions are matched by the repo link recorded when they were indexed. To cover just one worktree, list that worktree's folder and not the main repo. A subfolder of a repo listed as a member covers only that subfolder.
 - A folder can be in several groups. `--group a --group b` returns each session once.
 - A plan belongs to the groups of the sessions linked to it.
-- `archiver groups` shows each group's folders with session and plan counts and first/last activity. It flags a folder that doesn't exist (typo?) and one that exists but has no sessions yet.
+- `archiver groups` shows each group's folders with session and plan counts and first/last activity, plus the worktrees each repo folder picked up. It flags a folder that doesn't exist (typo?) and one that exists but has no sessions yet.
 - The config file must be valid JSON. If it isn't, every command warns and runs without groups.
 
 ## Dates

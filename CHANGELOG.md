@@ -24,6 +24,7 @@ A fork of claude-session-index that runs next to it under its own name (`archive
 
 - Sessions now record where they ran: `cwd`, `project_root` (git root, else cwd), `git_common_dir` (groups worktrees), `git_branch`, and every folder used (`session_cwds`). The real path, not the lossy encoded directory name (`-Users-me-work-blog-site` → `E:\work\blog_site`).
 - **Project groups** in config (`project_groups`): name a set of folders once, filter with `--group`. A folder can be in several groups. `archiver groups` reports each group's folders, sessions, plans and activity, and flags folders that don't exist.
+- **Groups include git worktrees.** A member that is a repo's main folder also matches sessions in any worktree of that repo, wherever it lives, by the stored `git_common_dir`. Removed worktrees still match. A linked worktree or a subfolder listed as a member matches by path only. `archiver groups` lists the worktrees each member picked up. Re-indexing a session whose folder has since been deleted now keeps its stored `project_root` / `git_common_dir` instead of wiping the repo link. No re-index is needed to upgrade.
 - `--project` and `project_name` are unchanged.
 
 ### Dates and search

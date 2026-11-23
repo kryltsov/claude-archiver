@@ -6,6 +6,11 @@ Groups (config "project_groups": {name: [folder, ...]}):
   a session matches a member folder when its project_root, or any cwd it used
   (session_cwds), is that folder or sits under it. Paths compare after
   folders.normalize_path, so '\\' vs '/' and drive-letter case don't matter.
+  A member that is a repo's main worktree also matches every git worktree of that
+  repo, wherever it lives: sessions whose git_common_dir is '<member>/.git'. A
+  linked worktree or a subfolder listed as a member matches by path only, which is
+  how to narrow a group to one worktree. No git runs at query time, so a worktree
+  deleted after its sessions were indexed still matches.
   Several --group flags are a union; --project (upstream's LIKE match) then
   narrows inside it.
 
@@ -147,10 +152,18 @@ def _folder_match(expr: str, folder: str) -> tuple[str, list]:
             [folder, len(prefix), prefix])
 
 
+def common_dir_of(folder: str) -> str:
+    """The git common dir of the repo whose main worktree is folder."""
+    return folder.rstrip('/') + '/.git'
+
+
 def folder_sql(folders: list[str], alias: str = 's') -> tuple[str, list]:
-    """Sessions whose project_root or any used cwd is in/under one of folders."""
+    """Sessions whose project_root or any used cwd is in/under one of folders, or
+    that ran in a worktree of a repo whose main worktree is one of folders."""
     parts, params = [], []
     for f in folders:
+        parts.append(f"{alias}.git_common_dir = ?")
+        params.append(common_dir_of(f))
         sql, p = _folder_match(f"{alias}.project_root", f)
         parts.append(sql)
         params += p
@@ -245,13 +258,32 @@ def group_report(conn, group_config: dict) -> list[dict]:
     """Per group: each member folder's sessions, plans and activity window, plus totals.
 
     A member matching no sessions is flagged; that's usually a typo in the path.
+    A member's 'worktrees' are the folders outside it that it matched through its
+    repo's common dir, each with its own counts (already included in the member's).
     """
     register(conn)
     has_plans = conn.execute(
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name='plan_sessions'").fetchone()
 
     def summarise(folders: list[str]) -> dict:
-        where, params = folder_sql(folders, 's')
+        return summarise_where(*folder_sql(folders, 's'))
+
+    def worktrees(folder: str) -> list[dict]:
+        common = common_dir_of(folder)
+        inside, inside_params = _folder_match('s.project_root', folder)
+        roots = [r[0] for r in conn.execute(f"""
+            SELECT DISTINCT s.project_root FROM sessions s
+            WHERE s.git_common_dir = ? AND s.project_root IS NOT NULL AND NOT {inside}
+            ORDER BY s.project_root
+        """, [common, *inside_params])]
+        out = []
+        for root in roots:
+            m = summarise_where("s.git_common_dir = ? AND s.project_root = ?", [common, root])
+            m.update(folder=root, exists=os.path.isdir(root))
+            out.append(m)
+        return out
+
+    def summarise_where(where: str, params: list) -> dict:
         row = conn.execute(f"""
             SELECT COUNT(*), MIN(s.start_time), MAX(COALESCE(s.end_time, s.start_time))
             FROM sessions s WHERE {where}
@@ -273,7 +305,7 @@ def group_report(conn, group_config: dict) -> list[dict]:
                 continue
             m = summarise([folder])
             m.update(folder=folder, raw=raw, no_match=(m['sessions'] == 0),
-                     exists=os.path.isdir(raw))
+                     exists=os.path.isdir(raw), worktrees=worktrees(folder))
             members.append(m)
         folders = [m['folder'] for m in members]
         total = summarise(folders) if folders else {'sessions': 0, 'plans': 0,

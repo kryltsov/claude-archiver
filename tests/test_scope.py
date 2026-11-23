@@ -93,12 +93,13 @@ class DBTestCase(unittest.TestCase):
         self._tmp.cleanup()
 
     def add(self, sid, root=None, start=None, end=None, cwds=(), project='-Users-me-work-x',
-            name='x', text='hello world'):
+            name='x', text='hello world', common=None):
         self.conn.execute("""
             INSERT INTO sessions (session_id, project, project_name, title_display, file_path,
-                indexed_at, start_time, end_time, project_root, exchange_count, duration_minutes)
-            VALUES (?, ?, ?, ?, ?, 'now', ?, ?, ?, 2, 5)
-        """, (sid, project, name, f'title {sid}', f'{sid}.jsonl', start, end, root))
+                indexed_at, start_time, end_time, project_root, exchange_count, duration_minutes,
+                git_common_dir)
+            VALUES (?, ?, ?, ?, ?, 'now', ?, ?, ?, 2, 5, ?)
+        """, (sid, project, name, f'title {sid}', f'{sid}.jsonl', start, end, root, common))
         for c in cwds:
             self.conn.execute("INSERT INTO session_cwds VALUES (?, ?)", (sid, c))
         self.conn.execute("INSERT INTO session_content (session_id, content) VALUES (?, ?)",
@@ -163,6 +164,70 @@ class TestGroupMatching(DBTestCase):
 
     def test_unscoped_is_everything(self):
         self.assertEqual(len(self.ids(S.Scope())), 8)
+
+
+WT_GROUPS = {
+    'app': ['E:/work/app'],                     # a repo's main worktree
+    'feature': ['E:\\work\\app-feature'],       # one linked worktree of it
+    'mono-app': ['E:/work/mono/packages/app'],  # a subfolder of another repo
+}
+APP_GIT = 'e:/work/app/.git'
+MONO_GIT = 'e:/work/mono/.git'
+
+
+class TestWorktreeMatching(DBTestCase):
+    """Sessions in a repo's worktrees share its git_common_dir; folders need not exist."""
+
+    def setUp(self):
+        super().setUp()
+        self.add('main', root='e:/work/app', common=APP_GIT)
+        self.add('nested-wt', root='e:/work/app/.claude/worktrees/x', common=APP_GIT)
+        self.add('wt', root='e:/work/app-feature', common=APP_GIT)
+        self.add('wt-gone', root='e:/work/app-old-branch', common=APP_GIT)
+        self.add('other', root='e:/work/other', common='e:/work/other/.git')
+        self.add('no-git', root='e:/work/app-notes')            # sibling name, not a worktree
+        self.add('mono-pkg', root='e:/work/mono', common=MONO_GIT,
+                 cwds=['E:\\work\\mono\\packages\\app'])
+        self.add('mono-root', root='e:/work/mono', common=MONO_GIT)
+        self.add('mono-wt', root='e:/work/mono-wt', common=MONO_GIT)
+
+    def scope(self, groups=None, **kw):
+        return S.build(groups=groups, group_config=WT_GROUPS, **kw)
+
+    def test_main_repo_member_matches_its_worktrees_anywhere(self):
+        self.assertEqual(self.ids(self.scope(['app'])),
+                         ['main', 'nested-wt', 'wt', 'wt-gone'])
+
+    def test_linked_worktree_member_matches_only_itself(self):
+        self.assertEqual(self.ids(self.scope(['feature'])), ['wt'])
+
+    def test_subfolder_member_does_not_pull_in_the_repo(self):
+        self.assertEqual(self.ids(self.scope(['mono-app'])), ['mono-pkg'])
+
+    def test_union_counts_each_session_once(self):
+        self.assertEqual(self.ids(self.scope(['app', 'feature'])),
+                         ['main', 'nested-wt', 'wt', 'wt-gone'])
+
+    def test_plans_of_worktree_sessions_are_in_scope(self):
+        self.plans.record_version('wt-plan', '# WT\n', 'write', session_id='wt',
+                                  captured_at='2026-09-10T00:00:00.000Z')
+        self.plans._link('wt-plan', 'wt', 'author', 1, 2)
+        S.register(self.conn)
+        where, params = self.scope(['app']).plan_where('p')
+        slugs = [r[0] for r in self.conn.execute(
+            f"SELECT p.slug FROM plans p WHERE {where}", params)]
+        self.assertEqual(slugs, ['wt-plan'])
+
+    def test_group_report_lists_picked_up_worktrees(self):
+        rep = {g['name']: g for g in S.group_report(self.conn, WT_GROUPS)}
+        app = rep['app']['members'][0]
+        self.assertEqual(app['sessions'], 4)
+        self.assertFalse(app['no_match'])
+        # nested-wt sits under the member, so it isn't listed as an outside worktree.
+        self.assertEqual([(w['folder'], w['sessions'], w['exists']) for w in app['worktrees']],
+                         [('e:/work/app-feature', 1, False), ('e:/work/app-old-branch', 1, False)])
+        self.assertEqual(rep['feature']['members'][0]['worktrees'], [])
+        self.assertEqual(rep['mono-app']['members'][0]['worktrees'], [])
 
 
 class TestDateOverlap(DBTestCase):

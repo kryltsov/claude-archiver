@@ -82,5 +82,49 @@ class TestIncrementalSkips(unittest.TestCase):
         self.assertEqual(self.run_incremental()['indexed'], 0)
 
 
+class TestRootsOfDeletedFolders(unittest.TestCase):
+    """Re-indexing after a worktree folder is removed keeps its link to the repo."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        self.projects = self.root / 'projects'
+        self.db = self.root / 'sessions.db'
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def index_twice(self, cwd: str, stored_root: str, stored_common: str):
+        """Index, plant stored roots, change the transcript, index it again."""
+        path = self.projects / 'p' / f'{SID}.jsonl'
+        t = Transcript(SID, cwd=cwd).user('a question about worktrees')
+        t.write_to(path)
+        ix = SessionIndexer(db_path=self.db, projects_dir=self.projects)
+        ix.connect()
+        try:
+            self.assertTrue(ix.index_session(file_path=str(path)))
+            ix.conn.execute("UPDATE sessions SET project_root=?, git_common_dir=?",
+                            (stored_root, stored_common))
+            ix.conn.commit()
+            t.reply('an answer').write_to(path)
+            self.assertTrue(ix.index_session(file_path=str(path)))
+            return tuple(ix.conn.execute(
+                "SELECT project_root, git_common_dir FROM sessions").fetchone())
+        finally:
+            ix.close()
+
+    def test_deleted_folder_keeps_stored_roots(self):
+        gone = str(self.root / 'removed-worktree')  # never created
+        self.assertEqual(self.index_twice(gone, 'e:/work/app-feature', 'e:/work/app/.git'),
+                         ('e:/work/app-feature', 'e:/work/app/.git'))
+
+    def test_existing_folder_is_derived_again(self):
+        here = self.root / 'plain-folder'  # exists, not a git repo
+        here.mkdir()
+        root, common = self.index_twice(str(here), 'e:/stale', 'e:/stale/.git')
+        self.assertNotEqual(root, 'e:/stale')
+        self.assertIsNone(common)
+
+
 if __name__ == '__main__':
     unittest.main()

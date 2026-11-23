@@ -150,6 +150,9 @@ class SessionIndexer:
         self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_sessions_project_root ON sessions(project_root)"
         )
+        self.conn.execute(  # groups match worktrees by common dir (scope.folder_sql)
+            "CREATE INDEX IF NOT EXISTS idx_sessions_git_common_dir ON sessions(git_common_dir)"
+        )
 
         plans.create_schema(self.conn)
         messages.create_schema(self.conn)
@@ -496,8 +499,16 @@ class SessionIndexer:
 
             # Folders (kept out of the upstream INSERT above so its diff stays small)
             project_root, git_common_dir = self._roots(data['cwd'])
-            self.conn.execute("""
-                UPDATE sessions SET cwd=?, project_root=?, git_common_dir=?, git_branch=?,
+            # A deleted folder (typically a removed worktree) can't be asked for its git
+            # roots any more: keep what was derived while it existed, so the session
+            # stays linked to its repo and its groups.
+            if data['cwd'] and not os.path.isdir(data['cwd']):
+                roots_sql = ("project_root=COALESCE(project_root, ?), "
+                             "git_common_dir=COALESCE(git_common_dir, ?)")
+            else:
+                roots_sql = "project_root=?, git_common_dir=?"
+            self.conn.execute(f"""
+                UPDATE sessions SET cwd=?, {roots_sql}, git_branch=?,
                     folders_scanned=1
                 WHERE session_id=?
             """, (data['cwd'], project_root, git_common_dir, data['git_branch'],
